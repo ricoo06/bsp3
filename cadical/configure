@@ -1,0 +1,774 @@
+#!/bin/sh
+
+#--------------------------------------------------------------------------#
+
+# Run './configure' to produce a 'makefile' in the 'build' sub-directory or
+# in any immediate sub-directory different from the 'src', 'scripts' and
+# 'test' directories.
+
+#--------------------------------------------------------------------------#
+
+rm -f configure.log
+
+#--------------------------------------------------------------------------#
+
+# kept in sync
+
+build=Release
+debug=no
+release=yes
+
+# implied/derived options (by default)
+
+check=unknown # set for 'debug'
+optimize=unknown # set for 'release'
+symbols=unknown # set for 'debug'
+
+# options explicitly set by user
+
+all=no
+check=no
+checkmissed=no
+competition=no
+contracts=yes
+contrib=yes
+coverage=no
+noptions=no
+dynamic=no
+exceptcontracts=no
+flexible=yes
+frameptr=no
+ipasir=yes
+logging=no
+memfuzz=no
+metrics=yes
+pedantic=no
+pic=no
+profile=no
+quiet=no
+shared=no
+termfuzz=no
+tracing=yes
+unlocked=yes
+m32=no
+
+# option lists
+
+libs=""
+options=""
+
+#--------------------------------------------------------------------------#
+
+if [ -f ./scripts/colors.sh ]
+then
+  . ./scripts/colors.sh
+elif [ -f ../scripts/colors.sh ]
+then
+  . ../scripts/colors.sh
+else
+  BAD=""
+  HILITE=""
+  BOLD=""
+  NORMAL=""
+fi
+
+die () {
+  if [ -f configure.log ]
+  then
+    checklog=" (check also 'configure.log')"
+  else
+    checklog=""
+  fi
+  cecho "${BOLD}configure:${NORMAL} ${BAD}error:${NORMAL} $*${checklog}"
+  exit 1
+}
+
+rm -f configure.log
+
+msg () {
+  cecho "${BOLD}configure:${NORMAL} $*"
+}
+
+# if we can find the 'color.sh' script source it and overwrite color codes
+
+for dir in . ..
+do
+  [ -f $dir/scripts/colors.sh ] || continue
+  . $dir/scripts/colors.sh || exit 1
+  break
+done
+
+#--------------------------------------------------------------------------#
+
+# Parse and handle command line options.
+
+usage () {
+cat << EOF
+usage: configure [ <option> ... ]
+
+where '<option>' is one of the following
+
+-h|--help          print this command line summary
+
+-g|--debug         'Debug' build (implies '-c', '-s')
+-r|--release       'Release' build (default)
+
+--competition      configure for the competition
+                   ('--quiet', '--no-contracts', '--no-tracing', '--no-metrics')
+
+-c|--check         assertion checking (default for 'Debug' build)
+-s|--symbols       produce and include symbols (default for 'Debug' build)
+-o|--optimize      optimized compilation (default for 'Release' build)
+
+-l|--log[ging]     include logging code (disabled by default)
+-a|--all           short cut for '-c -l -s'
+
+-q|--quiet         exclude message and profiling code (logging too)
+-p|--pedantic      add '--pedantic' and '-Werror' compilation flag
+
+--check-missed     compile with expensive assertion checking for missed
+                   implications (needs '-c')
+
+--coverage         compile with '-ftest-coverage -fprofile-arcs' for 'gcov'
+--profile          compile with '-pg' to profile with 'gprof'
+
+--memory[-fuzzing] compile with '-DMOBICAL_MEMORY' to fuzz for bad memory
+		   allocation handling, in addition for precisely printing
+		   function call traces on failing test traces uses further
+		   '-rdynamic' (not on MacOS) and '-fno-omit-frame-pointer'
+
+--terminate[-fuzzing]   compile with '-DMOBICAL_TERMINATE' to fuzz for bad
+                        terminator handling and use -fno-omit-frame-pointer'
+			and and possibly '-rdynamic' as above
+
+--no-contracts     compile without API contract checking code
+--except-contracts API contract violation exception (instead of abort)
+--no-tracing       compile without API call tracing code
+--no-contrib       compile without contributed code
+--no-ipasir        compile without ipasir interface
+
+--no-metrics       less statistics
+--no-options       hard-code options
+
+-f...              pass '-f<option>[=<val>]' options to the makefile
+-W...              pass '-W<warning>' options to the makefile
+-m32               pass '-m32' to the compiler (compile for 32 bit)
+-ggdb3             pass '-ggdb3' to makefile (like '-s')
+-O|-O[123]         pass '-O' or '-O[123]' to the makefile
+-static...         pass '-static...' option to makefile
+-shared            add '-fpic' compilation flag and produce shared library
+
+The environment variable CXX can be used to set a different C++
+compiler than the default 'g++'.  Similarly you can add additional
+compilation options by setting CXXFLAGS and CFLAGS.  For example
+
+  CXX=clang++ CXXFLAGS=-fPIC ./configure
+
+will enforce to use 'clang++' as C++ compiler and also produce
+position independent code.  In order to be shell independent we also
+allow to have the following form.  Thus for instance
+
+  ./configure CXX="g++-8" CXXFLAGS="-fPIC -fsanitize=address"
+
+will have the same effect as
+
+  CXX="g++-8" ./configure -fPIC -fsanitize=address
+
+The following configuration options might be usefull during porting the
+code to a new platform and are usually not necessary to change.
+
+--no-flexible      do not use flexible array members
+--no-unlocked      force compilation without unlocked IO
+EOF
+exit 0
+}
+
+#--------------------------------------------------------------------------#
+
+while [ $# -gt 0 ]
+do
+  case $1 in
+
+    -h|--help) usage;;
+
+    -g|--debug) release=no;debug=yes;build=Debug;;
+    -r|--release) release=yes;debug=no;build=Release;;
+
+    -a|--all) all=yes;;
+
+    -p|--pedantic) pedantic=yes;;
+    -q|--quiet) quiet=yes;;
+
+    -c|--check) check=yes;;
+    -s|--symbols) symbols=yes;;
+    -l|--log|--logging) logging=yes;; # Keep before next case!
+
+    -l*) libs="$libs $1";; # Keep after the previous case!
+
+    --no-contracts | --no-contract) contracts=no;;
+    --except-contracts | --except-contract) exceptcontracts=yes;;
+    --no-tracing | --no-trace) tracing=no;;
+    --no-contrib) contrib=no;;
+    --no-ipasir) ipasir=no;;
+    --no-metrics) metrics=no;;
+
+    --check-missed) checkmissed=yes;;
+    --coverage) coverage=yes;;
+    --profile) profile=yes;;
+
+    --memory|--memory-fuzzing) 
+      memfuzz=yes
+      frameptr=yes
+      dynamic=yes
+      ;;
+    --terminate|--terminator|--terminator-fuzzing|--terminate-fuzzing)
+      termfuzz=yes
+      dynamic=yes
+      frameptr=yes
+      ;;
+
+    --competition) competition=yes;;
+    --no-options) noptions=yes;;
+
+    --no-flexible) flexible=no;;
+    --no-unlocked) unlocked=no;;
+
+    -m32) options="$options $1";m32=yes;;
+    -fpic|-fPIC) options="$options $1"; pic=yes;;
+    -f*|-W*|-ggdb3) options="$options $1";;
+    -O|-O1|-O2|-O3) options="$options $1"; optimize=no;;
+    -o|--optimize) optimize=yes;;
+    -static*) options="$options $1";;
+    -shared|--shared) shared=yes;;
+
+    CXX=*)
+      CXX="`expr \"$1\" : 'CXX=\(.*\)'`"
+      ;;
+
+    CXXFLAGS=*)
+      CXXFLAGS="`expr \"$1\" : 'CXXFLAGS=\(.*\)'`"
+      ;;
+
+    CC=*)
+      CC="`expr \"$1\" : 'CXX=\(.*\)'`"
+      ;;
+
+    CFLAGS=*)
+      CFLAGS="`expr \"$1\" : 'CFLAGS=\(.*\)'`"
+      ;;
+
+    *) die "invalid option '$1' (try '-h')";;
+
+  esac
+  shift
+done
+
+#--------------------------------------------------------------------------#
+
+if [ $quiet = yes ]
+then
+  [ $logging = yes ] && die "can not combine '-q' with '-l'"
+fi
+
+if [ $all = yes ]
+then
+  [ $check = yes ] && die "'-a' subsumes '-c'"
+  [ $logging = yes ] && die "'-a' subsumes '-l'"
+  [ $symbols = yes ] && die "'-a' subsumes '-s'"
+  check=yes
+  logging=yes
+  symbols=yes
+elif [ $debug = yes ]
+then
+  [ $check = yes ] && die "'-g' subsumes '-c'"
+  [ $symbols = yes ] && die "'-g' subsumes '-s'"
+  check=yes
+elif [ $release = yes ]
+then
+  [ $optimize = yes ] && die "default '-r' subsumes '-o'"
+fi
+
+if [ $checkmissed = yes ]
+then
+  [ $check = no ] && \
+    die "'--check-missed' requires assertion checking ('-c')"
+fi
+
+if [ $contracts = no ]
+then
+  [ $exceptcontracts = yes ] && \
+    die "'--except-contract' not compatible with '--no-contract'"
+fi
+
+
+#--------------------------------------------------------------------------#
+
+# Generate and enter 'build' directory if not already in sub-directory.
+
+msg "'$build' build"
+
+build_in_default_build_sub_directory () {
+  if [ -d build ]
+  then
+    msg "reusing default 'build' directory"
+  else
+    mkdir build 2>/dev/null || \
+    die "failed to generate 'build' directory"
+    msg "making default 'build' directory"
+  fi
+  cd build
+  msg "building in default ${HILITE}'`pwd`'${NORMAL}"
+  build=build
+}
+
+if [ -f configure -a -f makefile.in -a -d src ]
+then
+  root="`pwd`"
+  build_in_default_build_sub_directory
+elif [ -f ../configure -a -f ../makefile.in -a -d ../src ]
+then
+  cwd="`pwd`"
+  build=`basename "$cwd"`
+  root=`dirname "$cwd"`
+  case x"$build" in
+    xsrc|xtest|xscripts)
+      cd ..
+      build_in_default_build_sub_directory
+      ;;
+    *)
+      msg "building in ${HILITE}'$build'${NORMAL} sub-directory"
+      ;;
+  esac
+else
+  die "call 'configure' from root of CaDiCaL source or a sub-directory"
+fi
+
+msg "root directory '$root'"
+
+#--------------------------------------------------------------------------#
+
+src="$root/src"
+
+if [ -d "$src" ]
+then
+  msg "source directory '$src'"
+else
+  die "could not find source director '$src'"
+fi
+
+#--------------------------------------------------------------------------#
+
+# Prepare '@CXX@', '@CC@', '@CXXFLAGS@' and '@CFLAGS@' for 'makefile.in'
+
+[ x"$CXX" = x ] && CXX=g++
+[ x"$CXXFLAGS" = x ] || CXXFLAGS="$CXXFLAGS "
+
+if [ x"$CC" = x ]
+then
+  case x"$CXX" in
+    xclang++) CC=clang ;;
+    xg++) CC=gcc ;;
+    *) CC="$CXX";;
+  esac
+fi
+
+[ x"$CFLAGS" = x ] || CFLAGS="$CFLAGS "
+
+case x"$CXX" in
+  x*g++*|x*clang++*)
+    CXXFLAGS="${CXXFLAGS}-Wall -Wextra"
+    CFLAGS="${CFLAGS}-Wall -Wextra"
+    ;;
+  *)
+    CXXFLAGS="${CXXFLAGS}-W"
+    CFLAGS="${CFLAGS}-W"
+    ;;
+esac
+
+case x"$CXX" in
+  x*clang++*)
+    clang=yes
+    msg "assuming 'clang' used as compiler"
+    ;;
+  *) 
+    msg "assuming 'clang' NOT used as compiler"
+    clang=no
+    ;;
+esac
+
+if [ "`uname`" = Darwin ]
+then
+  msg "assuming compiling for 'MacOS'"
+  apple=yes
+else
+  msg "assuming NOT compiling for 'MacOS'"
+  apple=no
+fi
+
+[ $check = unknown ] && check=$debug
+[ $optimize = unknown ] && optimize=$release
+[ $symbols = unknown ] && symbols=$debug
+
+if [ $symbols = yes ]
+then
+  CXXFLAGS="$CXXFLAGS -g"
+  CFLAGS="$CFLAGS -g"
+fi
+
+if [ $optimize = yes ]
+then
+  case x"$CXX" in
+    x*g++*|x*clang++*) CXXFLAGS="$CXXFLAGS -O3"; CFLAGS="$CFLAGS -O3";;
+    *) CXXFLAGS="$CXXFLAGS -O"; CFLAGS="$CFLAGS -O";;
+  esac
+fi
+
+if [ $m32 = yes ]
+then
+  case x"$CXX" in
+    x*g++*)
+      options="$options -mpc64"
+      msg "forcing portable 64-bit FPU mode ('-mpc64') for '$CXX'"
+      ;;
+  esac
+fi
+
+if [ $competition = yes ]
+then
+  quiet=yes
+  contracts=no
+  tracing=no
+  contrib=no
+  metrics=no
+fi
+
+[ $dynamic = yes -a $apple = yes -o $clang = yes ] && dynamic=no
+
+
+[ $coverage = yes ] && CXXFLAGS="$CXXFLAGS -ftest-coverage -fprofile-arcs"
+[ $profile = yes ] && CXXFLAGS="$CXXFLAGS -pg -DPROFILE_MODE"
+
+[ $coverage = yes ] && CFLAGS="$CFLAGS -ftest-coverage -fprofile-arcs"
+[ $profile = yes ] && CFLAGS="$CFLAGS -pg"
+
+[ $dynamic = yes ] && CXXFLAGS="$CXXFLAGS -rdynamic"
+[ $frameptr = yes ] && CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer"
+
+if [ $pedantic = yes ]
+then
+  CXXFLAGS="$CXXFLAGS --pedantic -Werror -std=c++11"
+  CFLAGS="$CFLAGS --pedantic -Werror"
+  case x"$CXX" in
+    x*g++*|x*clang++*)
+      CXXFLAGS="${CXXFLAGS} -Wp,-D_GLIBCXX_ASSERTIONS,-D_GLIBCXX_DEBUG"
+    ;;
+  esac
+  case x"$CC" in
+    x*g++*|x*clang++*)
+      CFLAGS="${CFLAGS} -Wp,-D_GLIBCXX_ASSERTIONS"
+  esac
+fi
+
+[ $check = no ] && CXXFLAGS="$CXXFLAGS -DNDEBUG"
+[ $logging = yes ] && CXXFLAGS="$CXXFLAGS -DLOGGING"
+[ $metrics = no ] && CXXFLAGS="$CXXFLAGS -DNMETRICS"
+[ $quiet = yes ] && CXXFLAGS="$CXXFLAGS -DQUIET"
+
+[ $check = no ] && CFLAGS="$CFLAGS -DNDEBUG"
+[ $logging = yes ] && CFLAGS="$CFLAGS -DLOGGING"
+[ $metrics = no ] && CFLAGS="$CFLAGS -DNMETRICS"
+[ $quiet = yes ] && CFLAGS="$CFLAGS -DQUIET"
+
+[ $memfuzz = yes ] && CXXFLAGS="$CXXFLAGS -DMOBICAL_MEMORY"
+[ $termfuzz = yes ] && CXXFLAGS="$CXXFLAGS -DMOBICAL_TERMINATE"
+
+[ $contracts = no ] && CXXFLAGS="$CXXFLAGS -DNCONTRACTS"
+[ $exceptcontracts = yes ] && CXXFLAGS="$CXXFLAGS -DEXCEPTIONS"
+[ $tracing = no ] && CXXFLAGS="$CXXFLAGS -DNTRACING"
+[ $contrib = no ] && CXXFLAGS="$CXXFLAGS -DNCONTRIB"
+[ $ipasir = no ] && CXXFLAGS="$CXXFLAGS -DNIPASIR"
+[ $shared = yes -a $pic = no ] && CXXFLAGS="$CXXFLAGS -fpic"
+
+[ $contracts = no ] && CFLAGS="$CFLAGS -DNCONTRACTS"
+[ $tracing = no ] && CFLAGS="$CFLAGS -DNTRACING"
+[ $contrib = no ] && CFLAGS="$CFLAGS -DNCONTRIB"
+[ $ipasir = no ] && CFLAGS="$CFLAGS -DNIPASIR"
+[ $shared = yes -a $pic = no ] && CFLAGS="$CFLAGS -fpic"
+
+[ $checkmissed = yes ] && CXXFLAGS="$CXXFLAGS -DCHECKMISSED"
+[ $noptions = yes ] && CXXFLAGS="$CXXFLAGS -DNOPTIONS"
+[ $noptions = yes ] && CFLAGS="$CXXFLAGS -DNOPTIONS"
+
+CXXFLAGS="$CXXFLAGS$options"
+CFLAGS="$CFLAGS$options"
+
+#--------------------------------------------------------------------------#
+
+case x"$CXX" in
+  x*g++* | x*clang++*) WERROR="-Werror -pedantic";;
+  *) WERROR="";;
+esac
+
+# Check that compilation flags work.
+
+feature=./configure-hello-world
+cat <<EOF > $feature.cpp
+#include <iostream>
+int main () { std::cout << "hello world" << std::endl; }
+EOF
+if $CXX $CXXFLAGS $WERROR -o $feature.exe $feature.cpp 2>>configure.log
+then
+  if [ ! "`$feature.exe 2>>configure.log|tr -d '\r'`" = "hello world" ]
+  then
+    die "execution of '$feature.exe' failed"
+  fi
+else
+  die "test compilation '$feature.cpp'"
+fi
+
+#--------------------------------------------------------------------------#
+
+# Since C++11 is becoming the standard newer versions of 'g++' (7.3 for
+# instance) discourage certain GCC extensions, particularly the GCC version
+# of variadic macros, if the same concept exists in the standard.  This
+# forced us to replace all GCC style 'ARGS...' macros with '...' and
+# '__VA_ARGS__'.  Otherwise compiling the library with '--pedantic -Werror'
+# would fail (configuration flag '-p').  However, older versions of 'gcc'
+# (such as 4.8) would disallow these new forms of macros unless we
+# explicitly enforce the new standard with '-std=c++17'.  Here we try to
+# figure out whether we need that flag.
+
+feature=./configure-requires-c++11
+cat <<EOF > $feature.cpp
+#include <cstdio>
+#include <vector>
+
+// old variadic macro usage 'ARGS...' / '#ARGS' discouraged in g++-7...
+// new variadic macro usage '...' / '__VA_ARGS__' available in C99/C++11
+//
+#define MACRO(FMT, ...) printf (FMT "\n", __VA_ARGS__)
+
+// we use ranged for loops which became available in gcc 4.6 and for
+// the gcc 4.6 as well as 4.8 requires '-std=c++11' too.
+//
+unsigned f (const std::vector<unsigned> & a) {
+  unsigned res = 0;
+  for (auto i : a) res += i;
+  return res;
+}
+
+int main () { MACRO ("%d", 42); return 0; }
+EOF
+if $CXX $CXXFLAGS $WERROR -o $feature.exe $feature.cpp 2>>configure.log
+then
+  if [ "`$feature.exe 2>>configure.log|tr -d '\r'`" = 42 ]
+  then
+    msg "compiler supports all required C99/C++11 extensions"
+  else
+    die "checking compilation without '-std=c++11' failed"
+  fi
+else
+  CXXFLAGS="$CXXFLAGS -std=c++11"
+  if $CXX $CXXFLAGS -o $feature.exe $feature.cpp 2>>configure.log
+  then
+    if [ "`$feature.exe 2>>configure.log|tr -d '\r'`" = 42 ]
+    then
+      msg "using '-std=c++11' for all required C99/C++11 extensions"
+    else
+      die "checking compilation with '-std=c++11' failed"
+    fi
+  else
+    die "compiler does not support C99/C++11 even with '-std=c++11'"
+  fi
+fi
+
+#--------------------------------------------------------------------------#
+
+# Flexible array members are in C99 but not in C++11 but essential.  Thus
+# with pedantic compilation we have to fake them which in turn might produce
+# warnings.  To control those build variances with respect to warnings
+# we check the support of flexible array members explicitly.
+
+if [ $flexible = yes ]
+then
+  feature=./configure-have-flexible-array-members
+cat <<EOF > $feature.cpp
+#include <cstdlib>
+struct S {
+  int size;
+  int flexible_array_member[];
+};
+int main () {
+  struct S * s = (struct S*) malloc (12);
+  s->size = 2;
+  s->flexible_array_member[0] = 1;
+  s->flexible_array_member[1] = -1;
+  int res = 0;
+  for (int i = 0; i != s->size; i++)
+    res += s->flexible_array_member[i];
+  free (s);
+  return res;
+}
+EOF
+  if $CXX $CXXFLAGS -o $feature.exe $feature.cpp 2>>configure.log
+  then
+    if $feature.exe
+    then
+      msg "compiler configuration supports flexible array members"
+    else
+      msg "no support for flexible array members (non zero exit code)"
+      flexible=no
+    fi
+  else
+    msg "no support for flexible array members (compilation failed)"
+    flexible=no
+  fi
+else
+  msg "not using flexible array members (since '--no-flexible' specified)"
+fi
+
+[ $flexible = no ] && CXXFLAGS="$CXXFLAGS -DNFLEXIBLE"
+
+#--------------------------------------------------------------------------#
+
+# Unlocked IO is much faster but not necessarily supported.
+
+if [ $unlocked = yes ]
+then
+  feature=./configure-have-unlocked-io
+cat <<EOF > $feature.cpp
+#include <cstdio>
+int main () {
+  const char * path = "$feature.log";
+  FILE * file = fopen (path, "w");
+  if (!file) return 1;
+  if (putc_unlocked (42, file) != 42) return 1;
+  if (fclose (file)) return 1;
+  file = fopen (path, "r");
+  if (!file) return 1;
+  if (getc_unlocked (file) != 42) return 1;
+  if (fclose (file)) return 1;
+  return 0;
+}
+EOF
+  if $CXX $CXXFLAGS -o $feature.exe $feature.cpp 2>>configure.log
+  then
+    if $feature.exe
+    then
+      msg "unlocked IO with '{putc,getc}_unlocked' seems to work"
+    else
+      msg "not using unlocked IO (running '$feature.exe' failed)"
+      unlocked=no
+    fi
+  else
+    msg "not using unlocked IO (failed to compile '$feature.cpp')"
+    unlocked=no
+  fi
+else
+  msg "not using unlocked IO (since '--no-unlocked' specified)"
+fi
+
+[ $unlocked = no ] && CXXFLAGS="$CXXFLAGS -DNUNLOCKED"
+
+#--------------------------------------------------------------------------#
+# Preparing make goals (@GOALS@)
+
+goals="libcadical.a cadical mobical"
+
+sharedlibrary="libcadical.so"
+cadicaldynamic="cadical-dynamic"
+
+if [ $shared = yes ]
+then
+  msg "adding '$sharedlibrary' and '$cadicaldynamic' to default makefile goal"
+  goals="$goals $sharedlibrary $cadicaldynamic"
+else
+  if [ -f $sharedlibrary ]
+  then
+    msg "removing stale dynamic library '$sharedlibrary' (without '-shared')"
+    rm -f $sharedlibrary || exit 1
+  fi
+  if [ -f $cadicaldynamic ]
+  then
+    msg "removing stale dynamically linked '$cadicaldynamic' (without '-shared')"
+    rm -f $cadicaldynamic || exit 1
+  fi
+  msg "no '$sharedlibrary' shared library generated (without '-shared')"
+  msg "no '$cadicaldynamic' dynamically linked binary generated (without '-shared')"
+fi
+
+#--------------------------------------------------------------------------#
+
+# Instantiate '../makefile.in' template to produce 'makefile' in 'build'.
+
+msg "compiling C++ with ${HILITE}'$CXX $CXXFLAGS'${NORMAL}"
+msg "compiling C with ${HILITE}'$CC $CFLAGS'${NORMAL}"
+
+rm -f makefile
+sed \
+-e "2c\\
+# This 'makefile' is generated from '../makefile.in'." \
+-e "s,@CXX@,$CXX," \
+-e "s#@CXXFLAGS@#$CXXFLAGS#" \
+-e "s#@CC@#$CC#" \
+-e "s#@CFLAGS@#$CFLAGS#" \
+-e "s#@LIBS@#$libs#" \
+-e "s#@CONTRIB@#$contrib#" \
+-e "s#@IPASIR@#$ipasir#" \
+-e "s#@ROOT@#$root#" \
+-e "s#@GOALS@#$goals#" \
+../makefile.in > makefile
+
+msg "generated '$build/makefile' from '../makefile.in'"
+
+#--------------------------------------------------------------------------#
+
+build="`pwd`"
+makefile="`dirname "$build"`/makefile"
+cat <<EOF > "$makefile"
+CADICALBUILD=$build
+all:
+	\$(MAKE) -C "\$(CADICALBUILD)"
+clean:
+	@if [ -d "\$(CADICALBUILD)" ]; \\
+	then \\
+	  if [ -f "\$(CADICALBUILD)"/makefile ]; \\
+	  then \\
+	     touch "\$(CADICALBUILD)"/build.hpp; \\
+	     \$(MAKE) -C "\$(CADICALBUILD)" clean; \\
+	  fi; \\
+	  rm -rf "\$(CADICALBUILD)"; \\
+	fi
+	rm -f "$src/makefile"
+	rm -f "$makefile"
+test:
+	\$(MAKE) -C "\$(CADICALBUILD)" test
+cadical:
+	\$(MAKE) -C "\$(CADICALBUILD)" cadical
+mobical:
+	\$(MAKE) -C "\$(CADICALBUILD)" mobical
+update:
+	\$(MAKE) -C "\$(CADICALBUILD)" update
+format:
+	\$(MAKE) -C "\$(CADICALBUILD)" format
+.PHONY: all cadical clean mobical test format
+EOF
+
+msg "generated '../makefile' as proxy to ..."
+msg "... '$build/makefile'"
+
+#--------------------------------------------------------------------------#
+
+if [ -f "$src/makefile" ]
+then
+  msg "removing '$src/makefile'"
+  rm -f "$src/makefile"
+fi
+
+msg "linking '$root/makefile'"
+ln -s "$root/makefile" "$src/makefile"
+
+#--------------------------------------------------------------------------#
+
+msg "now run ${HILITE}'make'${NORMAL} to compile CaDiCaL"
+msg "optionally run 'make test'"
