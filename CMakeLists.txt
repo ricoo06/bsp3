@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(cadical_propagator_template LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -42,3 +42,8 @@ add_executable(propagator_demo main.cpp)
 add_dependencies(propagator_demo cadical_build)
 target_link_libraries(propagator_demo PRIVATE cadical)
 target_compile_options(propagator_demo PRIVATE -Wall -Wextra)
+
+add_executable(room_allocator room_allocator.cpp)
+add_dependencies(room_allocator cadical_build)
+target_link_libraries(room_allocator PRIVATE cadical)
+target_compile_options(room_allocator PRIVATE -Wall -Wextra)
