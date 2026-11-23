@@ -48,6 +48,8 @@ public:
   // Return true to accept the model. Return false and queue a clause
   // (via cb_has_external_clause) to reject it.
   bool cb_check_found_model(const std::vector<int> &model) override {
+    std::cout << "check model" << std::endl;
+    
     std::vector<int> true_vars;
     for (int v : vars)
       if (std::find(model.begin(), model.end(), v) != model.end())

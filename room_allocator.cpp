@@ -40,6 +40,9 @@ struct Room {
 };
 
 
+/*
+ * OUTPUT
+ */
 struct Decision {
   RequestId request_id;
   RoomId room_id;
@@ -47,7 +50,12 @@ struct Decision {
   Date end_date;
 };
 
+
+/*
+ * INTERNAL
+ */
 typedef std::tuple<RequestId, RoomId, Date> QrdTuple;
+typedef std::tuple<RequestId, RoomId> QrTuple;
 
  
 class RoomAllocator : public CaDiCaL::ExternalPropagator {
@@ -70,43 +78,117 @@ public:
   void
   register_start (CaDiCaL::Solver &slv)
   {
-    for (auto it_room : rooms_) {
-      RoomId room_id = it_room.first;
-      Room &room = it_room.second;
+    std::map<RoomId, std::vector<int>> room_var_lists;
+    slv_ = &slv;
 
-      std::vector<int> room_start_vars;
-      std::vector<int> room_norm_vars;
+    for (auto it_req : requests_) {
+      RequestId request_id = it_req.first;
+      const Request &request = it_req.second;
 
-      for (auto it_request : requests_) {
-        RequestId request_id = it_request.first;
-        Request &request = it_request.second;
+      std::vector<int> req_top_vars;
+      
+      for (auto it_room : rooms_) {
+        RoomId room_id = it_room.first;
+        const Room &room = it_room.second;
 
-        /*
-         * Don't even create the layer if it doesn't fit the amount of people
-         */
         if (room.capacity < request.num_people)
           continue;
 
-        QrdTuple t = {request_id, room_id, 0};
+        QrTuple qr = {request_id, room_id};
+        int qrv = new_top_var_(qr);
+        req_top_vars.push_back(qrv);
 
-        room_start_vars.push_back( maybe_new_start_var_(t) );
-        room_norm_vars.push_back( maybe_new_var_(t) );
+        QrdTuple qrd = {request_id, room_id, 0};
+        int qrdsv = maybe_new_start_var_(qrd);
+        int qrdv = maybe_new_var_(qrd);
+
+        room_var_lists[room_id].push_back(qrdv);
+
+        // qrdsv => qrdv
+        slv.add(-qrdsv);
+        slv.add(qrdv);
+        slv.add(0);
+        // qrdsv => qrv
+        slv.add(-qrdsv);
+        slv.add(qrv);
+        slv.add(0);
+
+        /* XXX: forward calendar? */
       }
 
-      for (int sv : room_start_vars)
-        slv.add(sv);
+      for (int qrv : req_top_vars)
+        slv.add(qrv);
       slv.add(0);
+    }
 
-      for (int v : room_norm_vars)
+    for (auto it_rv : room_var_lists) {
+      std::vector<int> &vars = it_rv.second;
+
+      for (int v : vars)
         slv.add(v);
       slv.add(0);
     }
+
+  }
+
+  void
+  flush_observed ()
+  {
+    for (int v : pending_observed_)
+      slv_->add_observed_var(v);
+      
+    pending_observed_.clear();
   }
 
   std::vector<Decision>
   decode ()
   const
   {
+#if 0
+    std::vector<Decision> decisions;
+
+    for (auto it_req : requests_) {
+      RequestId req_id = it_req.first;
+      const Request &req = it_req.second;
+      
+      for (auto it_room : rooms_) {
+        RoomId room_id = it_room.first;
+        Room &room = it_room.second;
+
+        if (req.num_people > room.capacity)
+          continue;
+
+        QrTuple qr = {req_id, room_id};
+        int qrv = vars_top_enc_.at(qr);
+
+        if (slv_->val(qrv) <= 0)
+          continue;
+
+        for (auto it_start : vars_start_enc_) {
+          QrdTuple t = it_start.first;
+          int tv = it_start.second;
+          RequestId t_req_id = std::get<0>(t);
+          RoomId t_room_id = std::get<1>(t);
+          Date t_date = std::get<2>(t);
+          
+          if (t_req_id != req_id || t_room_id != room_id)
+            continue;
+
+          if (slv_->val(tv) <= 0)
+            continue;
+
+          Date start_date = t_date;
+          Date end_date = t_date + req.length_of_stay - 1;
+          Decision de = {req_id, room_id, start_date, end_date};
+          decisions.push_back(std::move(de));
+          break;
+        }
+        // abort();
+      }
+    }
+    
+    return decisions;
+#endif
     return decisions_;
   }
 
@@ -115,14 +197,17 @@ public:
   notify_assignment (const std::vector<int> &lits)
   override
   {
-    for (int l : lits)
+    for (int l : lits) {
+      // std::cout << "new assignment: " << l << std::endl;
       trail_.push_back(l);
+    }
   }
 
   void
   notify_new_decision_level ()
   override
   {
+    std::cout << "notify new decision level" << std::endl;
     level_lims_.push_back(trail_.size());
   }
 
@@ -130,6 +215,7 @@ public:
   notify_backtrack (size_t new_level)
   override
   {
+    std::cout << "notifying backtrack" << std::endl;
     if (new_level < level_lims_.size()) {
       trail_.resize(level_lims_[new_level]);
       level_lims_.resize(new_level);
@@ -150,12 +236,17 @@ public:
      */
     for (int v : model) {
       if (vars_norm_dec_.contains(v)) {
+        // std::cout << "n: " << v << std::endl;
         vars_norm_true_.insert(v);
       } else if (vars_start_dec_.contains(v)) {
+        // std::cout << "s: " << v << std::endl;
         vars_start_true_.insert(v);
+      } else if (vars_top_dec_.contains(v)) {
+        // vars_top_true_.insert(v);
       }
     }
 
+   
     /*
      * Generate decisions
      */
@@ -169,7 +260,10 @@ public:
        for (Decision &d : decisions_) {
          /*
           * Bail out if duplicate booking
+          * XXX: does this cover QR ^ Q'R cases?
           */
+         std::cout << "HI BRO" << std::endl;
+         
          if (d.request_id == req_id) {
            for (int i = date; i < date + requests_[req_id].length_of_stay; ++i) {
              for (int j = d.start_date; j < d.end_date; ++j) {
@@ -183,30 +277,14 @@ public:
              }
            }
 
-          return false;
+           flush_observed();
+           return false;
          }
 
        }
 
        const Room &room = rooms_.at(room_id);
        const Request &req = requests_.at(req_id);
-
-       /*
-        * Check if room capacity fits
-        */
-       if (req.num_people > room.capacity) {
-         /* XXX: some way to tell the solver it should
-          * never assign this booking to this room */
-         for (int i = date; i < date + req.length_of_stay; ++i) {
-           QrdTuple t = {req_id, room_id, i};
-           int sv = maybe_new_start_var_(t);
-           int v = maybe_new_var_(t);
-           pending_clauses_.emplace_back(std::vector<int>{-sv});
-           pending_clauses_.emplace_back(std::vector<int>{v});
-         }
-         return false;
-       }
-
 
        /*
         * Check if valid length of stay
@@ -223,6 +301,7 @@ public:
             pending_clauses_.emplace_back(std::vector<int>{-sdv});
           }
 
+          flush_observed();
           return false;
        }
 
@@ -230,7 +309,7 @@ public:
        const int sv = maybe_new_start_var_(st); /* start variable */
 
        bool missing_in_chain = false;
-       for (Date d = date; d <= date + req.length_of_stay; ++d) {
+       for (Date d = date; d <= date + req.length_of_stay - 1; ++d) {
          QrdTuple ct = {req_id, room_id, d};
          int v = maybe_new_var_(ct);
 
@@ -240,8 +319,13 @@ public:
          }
        }
 
-       if (missing_in_chain)
+       if (missing_in_chain) {
+         flush_observed();
          return false;
+       }
+
+       Decision de = {req_id, room_id, date, date + req.length_of_stay - 1};
+       decisions_.push_back(std::move(de));
      }
      
     /*
@@ -270,12 +354,14 @@ public:
             pending_clauses_.emplace_back(std::vector<int>{-vj, vi});
           }
 
+          flush_observed();
           return false;
         }
         
       }
     }
 
+    flush_observed();
     return true;
   }
 
@@ -283,6 +369,7 @@ public:
   cb_has_external_clause (bool &is_forgettable)
   override
   {
+    std::cout << "has external clause?" << std::endl;
     is_forgettable = false;
     if (pending_clauses_.empty())
       return false;
@@ -297,6 +384,7 @@ public:
   cb_add_external_clause_lit ()
   override
   {
+    std::cout << "add external clause lit" << std::endl;
     if (ext_idx_ < ext_clause_.size())
       return ext_clause_[ext_idx_++];
     return 0;
@@ -363,6 +451,16 @@ private:
   }
 
   int
+  new_top_var_ (QrTuple t)
+  {
+    int v = ++var_counter_;
+    vars_top_enc_[t] = v;
+    vars_top_dec_[v] = t;
+    pending_observed_.push_back(v);
+    return v;
+  }
+
+  int
   maybe_new_var_ (QrdTuple t)
   {
     if (vars_norm_enc_.contains(t))
@@ -371,6 +469,7 @@ private:
     int v = ++var_counter_;
     vars_norm_enc_[t] = v;
     vars_norm_dec_[v] = t;
+    pending_observed_.push_back(v);
     return v;
   }
 
@@ -383,6 +482,7 @@ private:
     int v = ++var_counter_;
     vars_start_enc_[t] = v;
     vars_start_dec_[v] = t;
+    pending_observed_.push_back(v);
     return v;
   }
 
@@ -407,15 +507,21 @@ private:
   /*
    * State
    */
+  CaDiCaL::Solver *slv_;
+  
   int var_counter_ = 0;
 
   std::vector<int> trail_;
   std::vector<size_t> level_lims_;
 
+  std::vector<int> pending_observed_;
+
+  std::map<QrTuple, int> vars_top_enc_;
   std::map<QrdTuple, int> vars_norm_enc_;
   std::map<QrdTuple, int> vars_start_enc_;
   std::map<QrdTuple, std::set<int>> backwards_lengths_;
 
+  std::map<int, QrTuple> vars_top_dec_;
   std::map<int, QrdTuple> vars_norm_dec_;
   std::map<int, QrdTuple> vars_start_dec_;
 
@@ -469,6 +575,7 @@ main (int argc, char **argv)
   prop.register_start(slv);
   
   slv.connect_external_propagator(&prop);
+  prop.flush_observed();
 
   int res = slv.solve();
   char const *status;
@@ -486,6 +593,22 @@ main (int argc, char **argv)
 
   std::cout << status << std::endl;
 
+  if (res != 10) {
+    slv.disconnect_external_propagator();
+    return -1;
+  }
+  
+  std::vector<Decision> decisions = prop.decode();
+  std::cout << "Solution:" << std::endl;
+  for (const Decision &de : decisions) {
+    std::cout <<
+    "{" << std::endl <<
+    "  request_id " << de.request_id << std::endl <<
+    "  room_id " << de.room_id << std::endl <<
+    "  start_date " << de.start_date << std::endl <<
+    "  end_date " << de.end_date << std::endl <<
+    "}" << std::endl;
+  }
   slv.disconnect_external_propagator();
-  return res == 10 || res == 20 ? 0 : -1;
+  return 0;
 }
